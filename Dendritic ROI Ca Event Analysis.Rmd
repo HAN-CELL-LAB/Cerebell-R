@@ -1,0 +1,192 @@
+---
+title: "Dendritic ROI Ca Event Analysis"
+output: html_notebook
+---
+
+This code will analyze and plot Ca2+ event timing from Ca2+ traces that have been labeled in Ting's Matlab program. The input for this code is the output of a Ca2+ trace labeling session.
+
+
+```{r Load Libraries}
+library(ggplot2)
+library(RColorBrewer)
+library(cowplot)
+library(magick)
+library(plyr)
+library(dplyr)
+library(R.matlab)
+library(reshape2)
+library(matrixStats)
+library(qdapTools)
+```
+
+```{r Load Ca ROI data}
+#To analyze directly from the Matlab program output .mat file
+setwd('~/Desktop')
+
+#Choose file to analyze
+data_file <- file.choose()
+#Get file name and extension from selected file
+data_file_name_ext <- basename(data_file)
+#Get file name without extension
+data_file_name <- tools::file_path_sans_ext(data_file_name_ext)
+#Use file name as basis for output name
+Savename <- paste(data_file_name,"_analysis_fig.png", sep ="")
+
+#Read in the mat file as a list of lists
+input <-readMat(data_file)
+```
+
+```{r Load Ca trace Image}
+#Same as above but for any image file to accompany analysis
+image_file <- file.choose()
+image_file_name_ext <- basename(image_file)
+image_file_name <- tools::file_path_sans_ext(image_file_name_ext)
+Imagename <- paste(image_file_name,"_traces.png", sep= "")
+
+```
+
+```{r Convert + format input data}
+#convert mat input from list of 3 lists
+#(1. filename?; 2. List of 6 matrices (3 columns for event start, event peak, and NAN=1 or not=0), one for each ROI; 3. list of ROI names)
+#to a dataframe with 3 columns per ROI w headers X1, X2, X3, X1.1, X2.1, X3.1, X1.2, X2.2, X3.2 etc
+a <-  as.data.frame(input[["outputmat"]])
+
+#Convert the time indices to actual time based on sampling interval
+framerate <- 62
+interval <- 1000 / framerate
+a <- a * interval
+
+#Make dataframe for event start time data based on X1 base columns only
+a_starts <- a %>%
+  select(starts_with("X1"))
+
+#Make dataframe for event peak time data based on X2 base columns only
+a_peaks <- a %>%
+  select(starts_with("X2"))
+
+#Make dataframe for whether ROIs event data is NAN=1, or not=0 based on X3 base columns only
+a_NAN <- a %>%
+  select(starts_with("X3"))
+
+#a_NAN <- as.logical(unlist(a_NAN))
+
+#Switch 1's and 0's to better match the logical format of true/data=1 and false/NAN=0
+a_NAN[a_NAN==1]<-2
+a_NAN[a_NAN==0]<-1
+a_NAN[a_NAN==2]<-0
+
+#Get number of ROIs and ROI names
+numROIs <- ncol(a_starts)
+ROInames <- input[["roi.number"]]
+#They must have an order for the figures to work
+ROIsOrder <- as.numeric(ROInames)
+
+
+#ROI_Ca_times <- as.data.frame(a[["outputmat"]])
+
+#Rename columns by ROI names
+colnames(a_starts)<-ROInames
+colnames(a_peaks)<-ROInames
+colnames(a_NAN)<-ROInames
+
+#Use logical indices of a_NAN to keep or NAN data in peaks and starts dataframes
+a_starts[!a_NAN]<-NA
+a_peaks[!a_NAN]<-NA
+
+```
+
+```{r Analyze Leading ROI}
+#generate new column with row minimums to determine first event start time across ROIs
+a_starts$Firsts <- apply(a_starts,1,FUN = min,na.rm=TRUE) #na.rm to ignore NA and obtain value for rows that include NA values
+#generate column enumerating events
+a_starts$Events <- (1:nrow(a_starts))
+#melt data to get event start times of each ROI relative to the absolute start time for that event across ROIs
+ROI_Ca_timing_data <- melt(a_starts,id.vars = c("Events","Firsts"), variable.name = "ROI",value.name = "Ca_Event_Start")
+#subtract ROI event start time from absolute start time to obtain time to event start in each ROI relative to the first event time
+ROI_Ca_timing_data$Norm_Start <- (ROI_Ca_timing_data$Ca_Event_Start - ROI_Ca_timing_data$Firsts)
+
+#group and summarize data to get
+multiplot2_summary_data<-ROI_Ca_timing_data[,c(1,3,5)] %>%
+  group_by(ROI) %>%
+  summarise_at(vars(-Events), funs(mean(., na.rm=TRUE),sd(., na.rm=TRUE)))
+
+multiplot1_summary_data<-na.omit(ROI_Ca_timing_data[,c(3,5)]) %>%
+  group_by(ROI) %>%
+  summarise(TimesLeading = sum(Norm_Start == 0))
+#multiplot1_summary_data$ROI <- factor(multiplot1_summary_data$ROI, levels = ROIsOrder)
+ROI_lead_data<-multiplot1_summary_data
+ROI_timing_data<-multiplot2_summary_data
+```
+
+```{r Plot Lead Data Absolute #}
+#Create a color palette from existing palettes, most of which have 7-11 colors, and select the range of those colors (to exclude colors that are too light, maybe)
+my_color_palette = brewer.pal(n = 9, "BuPu")[9:(9-(numROIs-1))]
+
+#Horizontal bar chart of total times each ROI exhibited its rise time at the first detectable time for the given spike event
+multiplot1 <- ggplot(data=ROI_lead_data, aes(x=ROI, y=TimesLeading, fill=ROI))+
+  geom_bar(stat = "identity")+
+  theme_classic()+
+  scale_fill_manual(values = my_color_palette)+
+  theme(legend.position = "none")+
+  #to make it horizontal instead of vertical
+  coord_flip()+
+  #After coord_flip, ylab still refers to the axis that used to be the yaxis
+  ylab("Times Leading")+
+  ggtitle("Dendritic Ca Event \n Origin by ROI")+
+  theme(plot.title = element_text(face="bold", hjust = 0.5, size=24))+
+  theme(axis.title = element_text(hjust = 0.5, size=24, color = "black",face="bold"))+
+  theme(axis.text = element_text(hjust = 0.5, size=15, color = "black"))+
+  theme(axis.ticks = element_line(size=2, color = "black"))+
+  #under theme(), y axis seems to refer to the current y axis and not the previous one
+  theme(axis.title.y = element_blank())
+
+multiplot1
+```
+
+```{r Plot Lead Data Times}
+#Graph of ROI mean time post detectable Ca event start, vertically stacked points at mean with standard deviation error bars 
+multiplot2 <- ggplot(data=ROI_timing_data, aes(x=ROI, y=mean, fill=ROI, group=ROI))+
+  geom_point(size=8, shape=21)+
+  geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), color="black", width=0.2, size=1) +
+  theme_classic()+
+  scale_fill_manual(values = my_color_palette)+
+  theme(legend.position = "none")+
+  coord_flip()+
+  ylab("Start Time (ms)")+
+  ggtitle("Ca Event Timing \n Across ROIs")+
+  theme(plot.title = element_text(face="bold", hjust = 0.5, size=24))+
+  theme(axis.title = element_text(hjust = 0.5, size=24, color = "black",face="bold"))+
+  theme(axis.text = element_text(hjust = 0.5, size=15, color = "black"))+
+  theme(axis.ticks = element_line(size=2, color = "black"))+
+  theme(axis.title.y = element_blank())+
+  geom_hline(yintercept = 0, size=1, linetype="dashed")+
+  ylim(-10,100)
+
+multiplot2
+```
+
+```{r Plot Lead Data Figure}
+#to add images/graphs created outside of R, set working directory to folder with those files
+setwd("Plots")
+#read in the named image file
+image <- image_read(Imagename)
+#scale the image and convert into a format that works with ggplots
+trace_stack_image <- image_ggplot(image_scale(image, "1000"), interpolate = FALSE)
+
+#with traces
+ggdraw()+
+  draw_plot(multiplot1, x=0.4, y = 0.15, width = 0.3, height = 0.67)+
+  draw_plot(multiplot2, x=0.7, y = 0.15, width = 0.3, height = 0.67)+
+  draw_plot(trace_stack_image, x=0, y = 0, width = 0.4, height = 1)
+
+ggsave(filename = file.path(path,Savename), width = 17, height = 13, units = "cm")
+```
+
+```{r Plot Lead Data Stats}
+multiplot2_stats_data<-ROI_Ca_timing_data[,c(1,3,5)] %>%
+  group_by(ROI)
+
+res.aov<-aov(data= multiplot2_stats_data, Norm_Start~ROI)
+summary.aov(res.aov)
+TukeyHSD(res.aov)
+```
